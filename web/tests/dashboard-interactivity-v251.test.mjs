@@ -17,7 +17,7 @@ test('all four home financial summary cards are accessible controls with real ro
 test('navigation sends card selections to the correct focused editors', async () => {
   const shell = await get('components/AppShell.tsx');
   assert.match(shell, /setJourneyFocus\(feature === 'budgets'/);
-  assert.match(shell, /setControlFocus\(feature as typeof controlFocus\)/);
+  assert.match(shell, /setControlFocus\(\['property', 'accounts', 'funding', 'partners', 'cash'\]\.includes/);
   assert.match(shell, /focusSection=\{controlFocus\}/);
   assert.match(shell, /focusSection=\{journeyFocus\}/);
   assert.match(shell, /focusTransactionId=\{ledgerFocus\}/);
