@@ -1,0 +1,605 @@
+'use client';
+
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { House, ClipboardList, Building2, Plus, Receipt, Menu, Bell, ShieldCheck, HardHat } from 'lucide-react';
+import type { AttachmentRef, ProjectState, Transaction, TxType } from '@/lib/types';
+import { defaultState, normalizeState, validateProjectState } from '@/lib/defaults';
+import { computeLedger, findPotentialDuplicate, validateTx } from '@/lib/ledger';
+import {
+  getLocalState,
+  listLocalTransactions,
+  migrateLegacySnapshot,
+  putLocalState,
+  putLocalTransaction,
+  replaceLocalData,
+} from '@/lib/local-db';
+import { hasLocalPin, saveLocalPin, verifyLocalPin } from '@/lib/local-auth';
+import { Home } from '@/components/views/Home';
+import { Journey } from '@/components/views/Journey';
+import { AddTransaction } from '@/components/views/AddTransaction';
+import { Ledger } from '@/components/views/Ledger';
+import { More } from '@/components/views/More';
+import { ConstructionHub, tabs as constructionTabs } from '@/components/views/ConstructionHub';
+import type { BuildTab } from '@/components/views/ConstructionHub';
+import { dueReminders } from '@/lib/construction-calcs';
+
+type Tab = 'home' | 'journey' | 'build' | 'add' | 'ledger' | 'more';
+type RuntimeMode = 'checking' | 'cloud' | 'standalone';
+type AuthState = 'loading' | 'yes' | 'no' | 'setup';
+
+const TX_QUEUE = 'ptg_offline_queue_v2';
+const PENDING_STATE = 'ptg_pending_state_v2';
+
+function readTxQueue(): Transaction[] {
+  try { return JSON.parse(localStorage.getItem(TX_QUEUE) || '[]'); } catch { return []; }
+}
+
+function writeTxQueue(q: Transaction[]) {
+  localStorage.setItem(TX_QUEUE, JSON.stringify(q));
+}
+
+function sortTransactions(txs: Transaction[]) {
+  return [...txs].sort(
+    (a, b) =>
+      a.transactionDate.localeCompare(b.transactionDate) ||
+      a.createdAt.localeCompare(b.createdAt)
+  );
+}
+
+function reversalType(type: TxType): TxType {
+  if (type === 'EXPENSE') return 'REFUND';
+  if (type === 'TRANSFER') return 'TRANSFER';
+  if (type === 'ADVANCE') return 'ADVANCE_REFUND';
+  throw new Error('This transaction cannot be auto-voided. Add a correcting entry instead.');
+}
+
+export function AppShell() {
+  const [mode, setMode] = useState<RuntimeMode>('checking');
+  const [auth, setAuth] = useState<AuthState>('loading');
+  const [pin, setPin] = useState('');
+  const [pinConfirm, setPinConfirm] = useState('');
+  const [loginErr, setLoginErr] = useState('');
+  const [state, setState] = useState<ProjectState | null>(null);
+  const [txs, setTxs] = useState<Transaction[]>([]);
+  const [tab, setTab] = useState<Tab>('home');
+  const [buildTab, setBuildTab] = useState<BuildTab>('floors');
+  const [journeyFocus, setJourneyFocus] = useState<'budgets' | 'milestones'>('milestones');
+  const [controlFocus, setControlFocus] = useState<'property' | 'accounts' | 'funding' | 'partners' | 'cash'>('property');
+  const [ledgerFocus, setLedgerFocus] = useState<string | null>(null);
+  const [ledgerType, setLedgerType] = useState<'ALL' | TxType>('ALL');
+  function goTo(section: Tab, feature?: string) {
+    if (section === 'build' && feature && constructionTabs.some(t => t.id === feature)) setBuildTab(feature as BuildTab);
+    if (section === 'journey') setJourneyFocus(feature === 'budgets' ? 'budgets' : 'milestones');
+    if (section === 'more' && ['property','accounts','funding','partners','cash'].includes(feature || '')) {
+      setControlFocus(feature as typeof controlFocus);
+    }
+    if (section === 'ledger') {
+      setLedgerFocus(feature && !['expenses','funding'].includes(feature) ? feature : null);
+      setLedgerType(feature === 'expenses' ? 'EXPENSE' : feature === 'funding' ? 'FUNDING_IN' : 'ALL');
+    }
+    setTab(section);
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' });
+  }
+  const [scanDraft, setScanDraft] = useState<{ amount: string; date: string; payee: string; description: string; attachment?: AttachmentRef } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState('');
+  const [online, setOnline] = useState(true);
+  const [backendError, setBackendError] = useState('');
+
+  const loadStandalone = useCallback(async (checkLock = false) => {
+    await migrateLegacySnapshot();
+    let localState = await getLocalState();
+    if (!localState) {
+      localState = defaultState();
+      await putLocalState(localState);
+    }
+    const localTransactions = await listLocalTransactions();
+    setState(normalizeState(localState));
+    setTxs(sortTransactions(localTransactions));
+    setBackendError('');
+    if (checkLock) setAuth(hasLocalPin() ? 'no' : 'setup');
+  }, []);
+
+  const loadCloud = useCallback(async () => {
+    try {
+      const [stateResponse, txResponse] = await Promise.all([
+        fetch('/api/state', { cache: 'no-store' }),
+        fetch('/api/transactions', { cache: 'no-store' }),
+      ]);
+
+      if (stateResponse.status === 401 || txResponse.status === 401) {
+        setBackendError('');
+        setAuth('no');
+        return;
+      }
+      if (!stateResponse.ok || !txResponse.ok) {
+        const response = stateResponse.ok ? txResponse : stateResponse;
+        const detail = await response.json().catch(() => ({ error: 'Cloud backend unavailable' }));
+        throw new Error(detail.error || 'Cloud backend unavailable');
+      }
+
+      const sj = await stateResponse.json();
+      const tj = await txResponse.json();
+      const nextState = normalizeState(sj.state);
+      const nextTxs = sortTransactions(tj.transactions || []);
+      setState(nextState);
+      setTxs(nextTxs);
+      await replaceLocalData(nextState, nextTxs);
+      setBackendError('');
+      setAuth('yes');
+    } catch (e) {
+      const localState = await getLocalState();
+      const localTransactions = await listLocalTransactions();
+      if (localState) {
+        setState(normalizeState(localState));
+        setTxs(sortTransactions(localTransactions));
+        setAuth('yes');
+        setBackendError('Cloud is temporarily unavailable. Using the on-device copy; pending changes will retry.');
+      } else {
+        setBackendError(e instanceof Error ? e.message : 'Cloud backend unavailable');
+      }
+    }
+  }, []);
+
+  const bootstrap = useCallback(async () => {
+    setAuth('loading');
+    setOnline(typeof navigator === 'undefined' ? true : navigator.onLine);
+    await migrateLegacySnapshot();
+
+    try {
+      const response = await fetch('/api/health', { cache: 'no-store' });
+      const health = response.ok ? await response.json() : null;
+      if (health?.cloudReady) {
+        setMode('cloud');
+        await loadCloud();
+        return;
+      }
+    } catch {
+      // No server connection is required for standalone mode.
+    }
+
+    setMode('standalone');
+    await loadStandalone(true);
+  }, [loadCloud, loadStandalone]);
+
+  const reload = useCallback(async () => {
+    if (mode === 'cloud') await loadCloud();
+    else await loadStandalone(false);
+  }, [mode, loadCloud, loadStandalone]);
+
+  const flush = useCallback(async () => {
+    if (mode !== 'cloud' || !navigator.onLine) return;
+
+    const pendingState = localStorage.getItem(PENDING_STATE);
+    if (pendingState) {
+      try {
+        const response = await fetch('/api/state', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: pendingState,
+        });
+        if (response.ok) localStorage.removeItem(PENDING_STATE);
+      } catch {
+        return;
+      }
+    }
+
+    const q = readTxQueue();
+    if (!q.length) {
+      await loadCloud();
+      return;
+    }
+
+    const keep: Transaction[] = [];
+    for (const t of q) {
+      try {
+        const response = await fetch('/api/transactions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...t, allowDuplicate: true }),
+        });
+        if (!response.ok && response.status !== 409) keep.push(t);
+      } catch {
+        keep.push(t);
+      }
+    }
+    writeTxQueue(keep);
+    await loadCloud();
+  }, [mode, loadCloud]);
+
+  useEffect(() => {
+    bootstrap();
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+    const on = () => {
+      setOnline(true);
+      if (mode === 'cloud') flush();
+    };
+    const off = () => setOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => {
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
+    };
+  }, [bootstrap, flush, mode]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(''), 3500);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  const summary = useMemo(() => (state ? computeLedger(state.accounts, txs) : null), [state, txs]);
+
+  // Foreground browser reminder notifications. No background push claim: browsers may
+  // suspend this page when closed. Android native notifications need a separate bridge.
+  useEffect(() => {
+    if (auth !== 'yes' || !state) return;
+    const tick = () => {
+      if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+      const today = new Date().toLocaleDateString('en-CA');
+      for (const reminder of dueReminders(state.construction.reminders, new Date())) {
+        if (reminder.completed) continue;
+        const key = 'ptg-notified:' + reminder.id + ':' + today;
+        if (localStorage.getItem(key)) continue;
+        try {
+          new Notification('Plot to Ghar · ' + reminder.category, { body: reminder.title, icon: '/icon.svg', tag: reminder.id });
+          localStorage.setItem(key, '1');
+        } catch { /* Unsupported notification surface; in-app list remains available. */ }
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, 60_000);
+    return () => window.clearInterval(timer);
+  }, [auth, state]);
+
+  async function login(e: React.FormEvent) {
+    e.preventDefault();
+    setLoginErr('');
+
+    if (mode === 'standalone') {
+      const ok = await verifyLocalPin(pin);
+      if (!ok) {
+        setLoginErr('Invalid PIN');
+        return;
+      }
+      setPin('');
+      setAuth('yes');
+      return;
+    }
+
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin }),
+    });
+    if (response.ok) {
+      setPin('');
+      await loadCloud();
+    } else {
+      setLoginErr((await response.json().catch(() => ({}))).error || 'Login failed');
+    }
+  }
+
+  async function setupPin(e: React.FormEvent) {
+    e.preventDefault();
+    setLoginErr('');
+    if (!/^\d{4,12}$/.test(pin)) {
+      setLoginErr('Choose a 4–12 digit PIN.');
+      return;
+    }
+    if (pin !== pinConfirm) {
+      setLoginErr('PINs do not match.');
+      return;
+    }
+    await saveLocalPin(pin);
+    setPin('');
+    setPinConfirm('');
+    setAuth('yes');
+    setToast('Local PIN created');
+  }
+
+  async function saveState(next: ProjectState) {
+    setBusy(true);
+    try {
+      const normalized = validateProjectState(
+        normalizeState({
+          ...next,
+          revision: Number(next.revision || 1) + 1,
+          updatedAt: new Date().toISOString(),
+        })
+      );
+
+      await putLocalState(normalized);
+      setState(normalized);
+
+      if (mode === 'standalone') {
+        setToast('Project saved on this device');
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/state', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(normalized),
+        });
+        if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Save failed');
+        const body = await response.json();
+        const cloudState = normalizeState(body.state);
+        setState(cloudState);
+        await putLocalState(cloudState);
+        localStorage.removeItem(PENDING_STATE);
+        setToast('Project saved');
+      } catch {
+        localStorage.setItem(PENDING_STATE, JSON.stringify(normalized));
+        setToast('Saved on device; cloud sync will retry');
+      }
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : 'Save failed');
+      throw e; // Editors must never report success when validation or persistence failed.
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function postTx(t: Transaction) {
+    setBusy(true);
+    try {
+      if (!state) throw new Error('Project is not loaded.');
+      validateTx(t, { state, transactions: txs });
+
+      const duplicate = findPotentialDuplicate(t, txs);
+      let allowDuplicate = false;
+      if (duplicate) {
+        allowDuplicate = window.confirm('Possible duplicate transaction found. Save it anyway?');
+        if (!allowDuplicate) return;
+      }
+
+      if (mode === 'standalone') {
+        await putLocalTransaction(t);
+        const next = sortTransactions([...txs.filter((x) => x.id !== t.id), t]);
+        setTxs(next);
+        setToast('Transaction saved on this device');
+        setTab('ledger');
+        return;
+      }
+
+      try {
+        let response = await fetch('/api/transactions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...t, allowDuplicate }),
+        });
+
+        if (response.status === 409 && !allowDuplicate) {
+          const proceed = window.confirm('Possible duplicate transaction found on the cloud ledger. Save it anyway?');
+          if (!proceed) return;
+          response = await fetch('/api/transactions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...t, allowDuplicate: true }),
+          });
+        }
+
+        if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Save failed');
+        const body = await response.json();
+        await putLocalTransaction(body.transaction);
+        const next = sortTransactions([...txs.filter((x) => x.id !== body.transaction.id), body.transaction]);
+        setTxs(next);
+        setToast('Transaction saved');
+        setTab('ledger');
+      } catch (e) {
+        if (!navigator.onLine || e instanceof TypeError) {
+          const q = readTxQueue();
+          if (!q.some((x) => x.id === t.id)) q.push(t);
+          writeTxQueue(q);
+          await putLocalTransaction(t);
+          const next = sortTransactions([...txs.filter((x) => x.id !== t.id), t]);
+          setTxs(next);
+          setToast('Saved on device; cloud sync will retry');
+          setTab('ledger');
+        } else {
+          throw e;
+        }
+      }
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : 'Save failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function voidTx(id: string) {
+    if (!state) return;
+    if (!window.confirm('Create a correcting reversal? The original record remains in the audit trail.')) return;
+    setBusy(true);
+
+    try {
+      if (mode === 'standalone') {
+        const old = txs.find((x) => x.id === id);
+        if (!old) throw new Error('Transaction not found.');
+        const existing = txs.find((x) => x.reversalOf === old.id);
+        if (existing) {
+          setToast('This transaction is already reversed.');
+          return;
+        }
+
+        const existingSettlements = txs.filter((x) => x.linkedTransactionId === old.id && ['REFUND', 'ADVANCE_ADJUSTMENT', 'ADVANCE_REFUND'].includes(x.type));
+    if (existingSettlements.length) throw new Error('This entry has linked settlements or refunds; reverse them through dedicated correcting entries before voiding.');
+    const type = reversalType(old.type);
+        const reversal: Transaction = {
+          id: crypto.randomUUID(),
+          createdAt: new Date().toISOString(),
+          transactionDate: new Date().toISOString(),
+          type,
+          amount: old.amount,
+          sourceAccountId: type === 'TRANSFER' ? old.destinationAccountId : undefined,
+          destinationAccountId:
+            type === 'TRANSFER'
+              ? old.sourceAccountId
+              : type === 'REFUND' || type === 'ADVANCE_REFUND'
+                ? old.sourceAccountId
+                : undefined,
+          fundingSourceId: old.fundingSourceId,
+          milestoneId: old.milestoneId,
+          phaseId: old.phaseId,
+          vendorId: old.vendorId,
+          contractorId: old.contractorId,
+          costBucket: old.costBucket,
+          category: old.category,
+          payee: old.payee,
+          description: `Void/reversal of ${old.id}`,
+          reversalOf: old.id,
+          linkedTransactionId: old.type === 'ADVANCE' || old.type === 'EXPENSE' ? old.id : undefined,
+        };
+        validateTx(reversal, { state, transactions: txs });
+        await putLocalTransaction(reversal);
+        setTxs(sortTransactions([...txs, reversal]));
+        setToast('Correcting reversal created');
+        return;
+      }
+
+      if (!navigator.onLine) {
+        setToast('Cloud-mode reversals require an online connection.');
+        return;
+      }
+
+      const response = await fetch('/api/transactions/void', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Void failed');
+      await loadCloud();
+      setToast('Correcting reversal created');
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : 'Void failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function lockApp() {
+    if (mode === 'cloud') {
+      await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    }
+    setPin('');
+    setAuth('no');
+  }
+
+  if (auth === 'loading' || mode === 'checking') {
+    return <div className="center"><div className="spinner" /><p>Opening Plot to Ghar…</p></div>;
+  }
+
+  if (auth === 'setup') {
+    return (
+      <main className="login">
+        <section className="loginCard">
+          <img className="brandImage" src="/icon.svg" width={72} height={72} alt="Plot to Ghar" />
+          <h1>Set up Plot to Ghar</h1>
+          <p>Your data will be stored on this device. Create a PIN to protect access.</p>
+          <form onSubmit={setupPin}>
+            <label>
+              Create PIN
+              <input type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value)} autoFocus />
+            </label>
+            <label>
+              Confirm PIN
+              <input type="password" inputMode="numeric" value={pinConfirm} onChange={(e) => setPinConfirm(e.target.value)} />
+            </label>
+            {loginErr ? <div className="error">{loginErr}</div> : null}
+            <button className="primary">Create PIN & open app</button>
+          </form>
+        </section>
+      </main>
+    );
+  }
+
+  if (auth === 'no') {
+    return (
+      <main className="login">
+        <section className="loginCard">
+          <img className="brandImage" src="/icon.svg" width={72} height={72} alt="Plot to Ghar" />
+          <h1>Plot to Ghar</h1>
+          <p>{mode === 'standalone' ? 'On-device property & construction ledger' : 'Private property & construction ledger'}</p>
+          <form onSubmit={login}>
+            <label>
+              Access PIN
+              <input type="password" inputMode="numeric" value={pin} onChange={(e) => setPin(e.target.value)} autoFocus />
+            </label>
+            {loginErr ? <div className="error">{loginErr}</div> : null}
+            <button className="primary">Unlock</button>
+          </form>
+        </section>
+      </main>
+    );
+  }
+
+  if (!state || !summary) {
+    return (
+      <main className="login">
+        <section className="loginCard">
+          <h1>Unable to open project</h1>
+          <p>{backendError || 'Project data is unavailable.'}</p>
+          <button className="primary" onClick={bootstrap}>Retry</button>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <div className="app">
+      <header className="appTopbar">
+        <div className="brandIdentity">
+          <img src="/icon.svg" width={40} height={40} alt="Plot to Ghar" />
+          <div><strong>Plot <span className="brandGreen">to Ghar</span></strong>
+          <small>{state.project.name}</small></div>
+        </div>
+        <div className="topbarActions">
+          <span className={mode === 'standalone' ? 'deviceIndicator' : online ? 'cloudIndicator' : 'offlineIndicator'}>
+            <span className="indicatorDot" aria-hidden="true"/> {mode === 'standalone' ? 'On this device' : online ? 'Cloud connected' : 'Offline'}
+          </span>
+          <button type="button" className="headerReminder" aria-label="Open reminders" onClick={() => goTo('build', 'reminders')}><Bell size={19}/>{state.construction.reminders.some(r=>!r.completed) && <span aria-hidden="true" className="headerNotificationDot"/>}</button>
+        </div>
+      </header>
+
+      {backendError ? <div className="syncBanner">{backendError}</div> : null}
+      {mode === 'standalone' ? (
+        <div className="syncBanner">Zero-cost standalone mode · data and evidence are stored on this device · use Backup regularly.</div>
+      ) : null}
+
+      <main className="content">
+        {tab === 'home' ? <Home state={state} txs={txs} save={saveState} openSection={goTo} /> : null}
+        {tab === 'journey' ? <Journey state={state} save={saveState} focusSection={journeyFocus} onEditProperty={() => goTo('more','property')} /> : null}
+        {tab === 'build' ? <ConstructionHub initialTab={buildTab} state={state} txs={txs} save={saveState} mode={mode} onScanned={(draft) => { setScanDraft(draft); goTo('add'); }} onEditFunding={() => goTo('more', 'funding')} /> : null}
+        {tab === 'add' ? <AddTransaction key={scanDraft ? 'scan-' + scanDraft.date + '-' + scanDraft.amount + '-' + (scanDraft.attachment?.pathname || '') : 'manual'} prefill={scanDraft || undefined} state={state} txs={txs} onSave={async (t) => { await postTx(t); setScanDraft(null); }} mode={mode} /> : null}
+        {tab === 'ledger' ? <Ledger state={state} txs={txs} onVoid={voidTx} mode={mode} initialType={ledgerType} focusTransactionId={ledgerFocus} onAdd={() => goTo('add')} /> : null}
+        {tab === 'more' ? <More state={state} txs={txs} save={saveState} reload={reload} mode={mode} onLock={lockApp} focusSection={controlFocus} openSection={goTo} /> : null}
+      </main>
+
+      <nav className="appNav" aria-label="Primary navigation">
+        <div className="navDesktopBrand"><img src="/icon.svg" width={46} height={46} alt="" aria-hidden="true"/><div><b>Plot <span>to Ghar</span></b><small>Build your dream home.</small></div></div>
+        <div className="navSectionLabel">WORKSPACE</div>
+        {([
+          { id: 'home', label: 'Dashboard', Icon: House },
+          { id: 'journey', label: 'Journey', Icon: ClipboardList },
+          { id: 'build', label: 'Build', Icon: Building2 },
+          { id: 'add', label: 'Add', Icon: Plus },
+          { id: 'ledger', label: 'Ledger', Icon: Receipt },
+          { id: 'more', label: 'More', Icon: Menu },
+        ] as const).map(({id,label,Icon}) => (
+          <button key={id} type="button" aria-current={tab===id?'page':undefined} onClick={() => goTo(id)}
+            className={(tab===id?'active ':'')+(id==='add'?'addNav':'')}>
+            <span className="navIcon"><Icon size={22} strokeWidth={tab===id?2.5:1.95}/></span>
+            <span className="navLabel">{label}</span>
+          </button>
+        ))}
+        <div className="navDesktopFoot"><ShieldCheck size={18}/><span>Private financial workspace<br/><small>{mode==='standalone'?'Remember to back up your data':'Cloud sync enabled'}</small></span></div>
+      </nav>
+
+      {busy ? <div className="busy">Working…</div> : null}
+      {toast ? <div className="toast">{toast}</div> : null}
+    </div>
+  );
+}
