@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { House, ClipboardList, Building2, Plus, Receipt, Menu, Bell, ShieldCheck, HardHat } from 'lucide-react';
+import { House, ClipboardList, Building2, Plus, Receipt, Menu, Bell, ShieldCheck, HardHat, Link2 } from 'lucide-react';
+import { parseWorkspaceRoute, workspaceHref } from '@/lib/view-route';
 import type { AttachmentRef, ProjectState, Transaction, TxType } from '@/lib/types';
 import { defaultState, normalizeState, validateProjectState } from '@/lib/defaults';
 import { computeLedger, findPotentialDuplicate, validateTx } from '@/lib/ledger';
@@ -67,24 +68,70 @@ export function AppShell() {
   const [controlFocus, setControlFocus] = useState<'property' | 'accounts' | 'funding' | 'partners' | 'cash'>('property');
   const [ledgerFocus, setLedgerFocus] = useState<string | null>(null);
   const [ledgerType, setLedgerType] = useState<'ALL' | TxType>('ALL');
-  function goTo(section: Tab, feature?: string) {
-    if (section === 'build' && feature && constructionTabs.some(t => t.id === feature)) setBuildTab(feature as BuildTab);
+  // Browser navigation and in-app navigation share one route normalizer.
+  const applyRoute = useCallback((section: Tab, feature?: string) => {
+    if (section === 'build') {
+      setBuildTab(constructionTabs.some(t => t.id === feature) ? feature as BuildTab : 'floors');
+    }
     if (section === 'journey') setJourneyFocus(feature === 'budgets' ? 'budgets' : 'milestones');
-    if (section === 'more' && ['property','accounts','funding','partners','cash'].includes(feature || '')) {
-      setControlFocus(feature as typeof controlFocus);
+    if (section === 'more') {
+      setControlFocus(['property', 'accounts', 'funding', 'partners', 'cash'].includes(feature || '')
+        ? feature as 'property' | 'accounts' | 'funding' | 'partners' | 'cash'
+        : 'property');
     }
     if (section === 'ledger') {
-      setLedgerFocus(feature && !['expenses','funding'].includes(feature) ? feature : null);
+      setLedgerFocus(feature && !['expenses', 'funding'].includes(feature) ? feature : null);
       setLedgerType(feature === 'expenses' ? 'EXPENSE' : feature === 'funding' ? 'FUNDING_IN' : 'ALL');
     }
     setTab(section);
-    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'auto' });
+  }, []);
+
+  function goTo(section: Tab, feature?: string) {
+    applyRoute(section, feature);
+    if (typeof window !== 'undefined') {
+      // Transaction IDs are intentionally excluded from URLs.
+      const nextUrl = workspaceHref(section, feature);
+      if (window.location.pathname + window.location.search !== nextUrl) {
+        window.history.pushState({ plotToGharView: true }, '', nextUrl);
+      }
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    }
   }
+
+  // Initial deep link, refresh and browser back/forward must land on the same workspace.
+  useEffect(() => {
+    const syncFromUrl = () => {
+      const route = parseWorkspaceRoute(window.location.search);
+      applyRoute(route.section, route.feature);
+    };
+    syncFromUrl();
+    window.addEventListener('popstate', syncFromUrl);
+    return () => window.removeEventListener('popstate', syncFromUrl);
+  }, [applyRoute]);
+
   const [scanDraft, setScanDraft] = useState<{ amount: string; date: string; payee: string; description: string; attachment?: AttachmentRef } | null>(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState('');
   const [online, setOnline] = useState(true);
   const [backendError, setBackendError] = useState('');
+
+  async function copyViewLink() {
+    const feature =
+      tab === 'build' ? buildTab :
+      tab === 'journey' ? journeyFocus :
+      tab === 'more' ? controlFocus :
+      tab === 'ledger' ? ledgerType === 'EXPENSE' ? 'expenses' : ledgerType === 'FUNDING_IN' ? 'funding' : undefined :
+      undefined;
+    const link = new URL(workspaceHref(tab, feature), window.location.origin).toString();
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
+      await navigator.clipboard.writeText(link);
+      setToast('Link to this view copied');
+    } catch {
+      setToast('To share, open this view in your browser and copy the address bar.');
+    }
+  }
+
 
   const loadStandalone = useCallback(async (checkLock = false) => {
     await migrateLegacySnapshot();
@@ -557,6 +604,7 @@ export function AppShell() {
           <small>{state.project.name}</small></div>
         </div>
         <div className="topbarActions">
+          <button type="button" className="headerShare" aria-label="Copy link to current web page" title="Copy current view URL" onClick={() => { void copyViewLink(); }}><Link2 size={18}/><span>Copy link</span></button>
           <span className={mode === 'standalone' ? 'deviceIndicator' : online ? 'cloudIndicator' : 'offlineIndicator'}>
             <span className="indicatorDot" aria-hidden="true"/> {mode === 'standalone' ? 'On this device' : online ? 'Cloud connected' : 'Offline'}
           </span>
@@ -572,7 +620,7 @@ export function AppShell() {
       <main className="content">
         {tab === 'home' ? <Home state={state} txs={txs} save={saveState} openSection={goTo} /> : null}
         {tab === 'journey' ? <Journey state={state} save={saveState} focusSection={journeyFocus} onEditProperty={() => goTo('more','property')} /> : null}
-        {tab === 'build' ? <ConstructionHub initialTab={buildTab} state={state} txs={txs} save={saveState} mode={mode} onScanned={(draft) => { setScanDraft(draft); goTo('add'); }} onEditFunding={() => goTo('more', 'funding')} /> : null}
+        {tab === 'build' ? <ConstructionHub initialTab={buildTab} onTabChange={(nextTab) => goTo('build', nextTab)} state={state} txs={txs} save={saveState} mode={mode} onScanned={(draft) => { setScanDraft(draft); goTo('add'); }} onEditFunding={() => goTo('more', 'funding')} /> : null}
         {tab === 'add' ? <AddTransaction key={scanDraft ? 'scan-' + scanDraft.date + '-' + scanDraft.amount + '-' + (scanDraft.attachment?.pathname || '') : 'manual'} prefill={scanDraft || undefined} state={state} txs={txs} onSave={async (t) => { await postTx(t); setScanDraft(null); }} mode={mode} /> : null}
         {tab === 'ledger' ? <Ledger state={state} txs={txs} onVoid={voidTx} mode={mode} initialType={ledgerType} focusTransactionId={ledgerFocus} onAdd={() => goTo('add')} /> : null}
         {tab === 'more' ? <More state={state} txs={txs} save={saveState} reload={reload} mode={mode} onLock={lockApp} focusSection={controlFocus} openSection={goTo} /> : null}
