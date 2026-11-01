@@ -23,7 +23,7 @@ export const metadata: Metadata = {
     apple: [{ url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
     shortcut: '/icon.svg',
   },
-  appleWebApp: { capable: true, title: 'Plot to Ghar', statusBarStyle: 'black-translucent' },
+  appleWebApp: { capable: true, title: 'Plot to Ghar', statusBarStyle: 'default' },
   formatDetection: { telephone: false, address: false },
   openGraph: {
     type: 'website',
@@ -40,8 +40,8 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: '#07101e',
-  colorScheme: 'dark',
+  themeColor: '#f4f7fb',
+  colorScheme: 'light',
   width: 'device-width',
   initialScale: 1,
   viewportFit: 'cover',
