@@ -39,7 +39,7 @@ function numeric(s: string): number {
 }
 const today = () => new Date().toISOString().slice(0, 10);
 
-export function ConstructionHub(props: SuiteProps & { initialTab?: BuildTab }) {
+export function ConstructionHub(props: SuiteProps & { initialTab?: BuildTab; onTabChange?: (next: BuildTab) => void }) {
   const [tab, setTab] = useState<BuildTab>(props.initialTab || 'floors');
   useEffect(() => { if (props.initialTab) setTab(props.initialTab); }, [props.initialTab]);
   const suite = props.state.construction;
@@ -54,7 +54,7 @@ export function ConstructionHub(props: SuiteProps & { initialTab?: BuildTab }) {
     </div>
     <div className="suiteTabs" role="tablist" aria-label="Construction sections">
       {tabs.map(({id,title,Icon}) => <button key={id} type="button" role="tab" aria-selected={tab === id}
-        className={tab === id ? 'suiteTab selected' : 'suiteTab'} onClick={() => setTab(id)}>
+        className={tab === id ? 'suiteTab selected' : 'suiteTab'} onClick={() => { setTab(id); props.onTabChange?.(id); }}>
         <Icon size={17}/><span>{title}</span></button>)}
     </div>
     <div className="tabSubtitle"><span>{tabs.find(t => t.id === tab)?.description}</span></div>
