@@ -1,0 +1,20 @@
+# Local dependencies, caches and build outputs
+node_modules/
+web/node_modules/
+web/.next/
+.next/
+dist/
+build/
+.gradle/
+android/.gradle/
+android/app/build/
+*.apk
+*.aab
+*.keystore
+*.jks
+*.log
+.env
+.env.*
+!.env.example
+!web/.env.example
+.DS_Store

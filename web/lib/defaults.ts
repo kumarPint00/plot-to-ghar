@@ -1,0 +1,196 @@
+import type { ConstructionPhase, ProjectState } from './types';
+
+const milestoneNames = [
+  'Plot Locked',
+  'Registry Preparation',
+  'Registry Completed',
+  'Possession Received',
+  'Mutation / Post Registry',
+  'Construction Planning',
+  'Foundation & Plinth',
+  'Ground Floor Structure',
+  'First Floor Structure',
+  'MEP',
+  'Finishing',
+  'Completed',
+];
+
+const phaseNames = [
+  'Plot Purchase',
+  'Registry & Legal',
+  'Post-Registry & Mutation',
+  'Design & Pre-Construction',
+  'Site Preparation',
+  'Excavation & PCC',
+  'Foundation & Footing',
+  'Plinth, Filling & DPC',
+  'Ground Floor RCC',
+  'Ground Floor Masonry',
+  'First Floor RCC',
+  'First Floor Masonry',
+  'Plumbing',
+  'Electrical',
+  'Waterproofing',
+  'Flooring',
+  'Doors, Windows & Fabrication',
+  'Kitchen & Bathrooms',
+  'Painting & Exterior',
+  'Terrace & Final Finishing',
+];
+
+function defaultPhases(): ConstructionPhase[] {
+  return phaseNames.map((name, i) => ({
+    id: `phase-${i + 1}`,
+    name,
+    sequence: i + 1,
+    budgetAmount: 0,
+    status: 'PENDING',
+    progressPercent: 0,
+  }));
+}
+
+export function defaultState(): ProjectState {
+  return {
+    version: 3,
+    revision: 1,
+    project: {
+      name: 'C-19 Plot to Home',
+      status: 'REGISTRY_PENDING',
+      propertyAddress: '',
+      plotAreaSqYard: 120,
+      agreedPurchasePrice: 0,
+      ownerName: '',
+      sellerName: '',
+      notes: '',
+    },
+    accounts: [
+      { id: 'bank-main', name: 'Main Bank Account', type: 'BANK', openingBalance: 0, active: true },
+      { id: 'cash-main', name: 'Construction Cash', type: 'CASH', openingBalance: 0, active: true },
+    ],
+    fundingSources: [
+      { id: 'loan-purchase', name: 'Purchase Loan', type: 'PURCHASE_LOAN', committedAmount: 2500000 },
+      { id: 'loan-construction', name: 'Construction Loan', type: 'CONSTRUCTION_LOAN', committedAmount: 2100000 },
+      { id: 'own-funds', name: 'Own Funds', type: 'OWN_FUNDS', committedAmount: 0 },
+      { id: 'family', name: 'Family Contribution', type: 'FAMILY', committedAmount: 0 },
+    ],
+    milestones: milestoneNames.map((name, i) => ({
+      id: `m-${i + 1}`,
+      name,
+      sequence: i + 1,
+      status: i === 0 ? 'COMPLETED' : i === 1 ? 'IN_PROGRESS' : 'PENDING',
+    })),
+    phases: defaultPhases(),
+    vendors: [],
+    contractors: [],
+    loans: [
+      {
+        id: 'loan-piramal',
+        lenderName: 'Piramal Finance',
+        sanctionedAmount: 4600000,
+        purchaseComponent: 2500000,
+        constructionComponent: 2100000,
+      },
+    ],
+    cashReconciliations: [],
+    construction: {
+      floors: [
+        { id: 'floor-ground', name: 'Ground Floor · Shops + Parking', areaSqFt: 0, budgetAmount: 0, status: 'PLANNED' },
+        { id: 'floor-first', name: 'First Floor · 4BHK', areaSqFt: 0, budgetAmount: 0, status: 'PLANNED' },
+        { id: 'floor-terrace', name: 'Terrace / Roof', areaSqFt: 0, budgetAmount: 0, status: 'PLANNED' },
+      ],
+      schedule: [], agreements: [], progress: [], stockItems: [], stockMovements: [], reminders: [], documents: [],
+    },
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export function normalizeState(input?: Partial<ProjectState> | null): ProjectState {
+  const base = defaultState();
+  if (!input) return base;
+
+  const project = { ...base.project, ...(input.project || {}) };
+  const accounts = Array.isArray(input.accounts) && input.accounts.length ? input.accounts : base.accounts;
+  const fundingSources =
+    Array.isArray(input.fundingSources) && input.fundingSources.length ? input.fundingSources : base.fundingSources;
+  const milestones =
+    Array.isArray(input.milestones) && input.milestones.length ? input.milestones : base.milestones;
+  const phases = Array.isArray(input.phases) && input.phases.length ? input.phases : base.phases;
+
+  return {
+    ...base,
+    ...input,
+    version: 3,
+    revision: Number(input.revision || 1),
+    project,
+    accounts: accounts.map((a) => ({ ...a, openingBalance: Number(a.openingBalance || 0), active: a.active !== false })),
+    fundingSources: fundingSources.map((f) => ({ ...f, committedAmount: Number(f.committedAmount || 0) })),
+    milestones: milestones.map((m, i) => ({ ...m, sequence: Number(m.sequence || i + 1) })),
+    phases: phases.map((p, i) => ({
+      ...p,
+      sequence: Number(p.sequence || i + 1),
+      budgetAmount: Number(p.budgetAmount || 0),
+      progressPercent: Math.max(0, Math.min(100, Number(p.progressPercent || 0))),
+      status: p.status || 'PENDING',
+    })),
+    vendors: Array.isArray(input.vendors) ? input.vendors : [],
+    contractors: Array.isArray(input.contractors) ? input.contractors : [],
+    loans: Array.isArray(input.loans) && input.loans.length ? input.loans : base.loans,
+    cashReconciliations: Array.isArray(input.cashReconciliations) ? input.cashReconciliations : [],
+    construction: {
+      floors: Array.isArray(input.construction?.floors) ? input.construction.floors : base.construction.floors,
+      schedule: Array.isArray(input.construction?.schedule) ? input.construction.schedule : [],
+      agreements: Array.isArray(input.construction?.agreements) ? input.construction.agreements : [],
+      progress: Array.isArray(input.construction?.progress) ? input.construction.progress : [],
+      stockItems: Array.isArray(input.construction?.stockItems) ? input.construction.stockItems : [],
+      stockMovements: Array.isArray(input.construction?.stockMovements) ? input.construction.stockMovements : [],
+      reminders: Array.isArray(input.construction?.reminders) ? input.construction.reminders : [],
+      documents: Array.isArray(input.construction?.documents) ? input.construction.documents : [],
+    },
+    updatedAt: input.updatedAt || new Date().toISOString(),
+  };
+}
+
+export function validateProjectState(state: ProjectState) {
+  if (!state.project?.name?.trim()) throw new Error('Project name is required.');
+  if (state.project.name.length > 120) throw new Error('Project name is too long.');
+  if (state.accounts.length < 1 || state.accounts.length > 100) throw new Error('Invalid account list.');
+  if (state.fundingSources.length > 100 || state.milestones.length > 100 || state.phases.length > 100) {
+    throw new Error('Project configuration exceeds supported limits.');
+  }
+  const ids = new Set<string>();
+  for (const a of state.accounts) {
+    if (!a.id || ids.has(a.id)) throw new Error('Duplicate or missing account ID.');
+    ids.add(a.id);
+    if (!a.name?.trim()) throw new Error('Every account needs a name.');
+    if (!Number.isFinite(Number(a.openingBalance))) throw new Error('Invalid opening balance.');
+  }
+  for (const floor of state.construction.floors) {
+    if (!floor.id || !floor.name.trim() || !Number.isFinite(floor.areaSqFt) || floor.areaSqFt < 0) throw new Error('Invalid floor area.');
+    if (!Number.isFinite(floor.budgetAmount) || floor.budgetAmount < 0) throw new Error('Invalid floor budget.');
+  }
+  const workIds = new Set(state.construction.schedule.map((w) => w.id));
+  for (const work of state.construction.schedule) {
+    if (!work.name.trim() || !work.startDate || !work.endDate || work.endDate < work.startDate) throw new Error('Invalid construction schedule dates.');
+    if (!Number.isFinite(work.estimatedCost) || work.estimatedCost < 0) throw new Error('Invalid work estimate.');
+    if (work.dependsOnId && (!workIds.has(work.dependsOnId) || work.dependsOnId === work.id)) throw new Error('Invalid task dependency.');
+  }
+  for (const a of state.construction.agreements) {
+    if (!a.title.trim() || !a.scope.trim() || !Number.isFinite(a.value) || a.value < 0) throw new Error('Invalid contractor agreement.');
+    if (!state.contractors.some((c) => c.id === a.contractorId)) throw new Error('Agreement contractor not found.');
+  }
+  for (const doc of state.construction.documents) {
+    if (!doc.id || !doc.title.trim() || !doc.date || !Number.isFinite(Date.parse(doc.date))) throw new Error('A document needs a title and valid date.');
+    if (!Array.isArray(doc.attachments) || doc.attachments.length === 0 || doc.attachments.length > 12) throw new Error('Attach 1–12 files per document.');
+  }
+  for (const item of state.construction.stockItems) {
+    if (!item.name.trim() || !item.unit.trim() || !Number.isFinite(item.reorderLevel) || item.reorderLevel < 0) throw new Error('Invalid inventory item.');
+  }
+  for (const entry of state.construction.stockMovements) {
+    if (!state.construction.stockItems.some((s) => s.id === entry.itemId) || !Number.isFinite(entry.quantity) || entry.quantity <= 0) throw new Error('Invalid inventory movement.');
+  }
+  for (const p of state.phases) {
+    if (!p.id || !p.name?.trim()) throw new Error('Invalid construction phase.');
+    if (!Number.isFinite(Number(p.budgetAmount)) || Number(p.budgetAmount) < 0) throw new Error('Invalid phase budget.');
+  }
+  return state;
+}
