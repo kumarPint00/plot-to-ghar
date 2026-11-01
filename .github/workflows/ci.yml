@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 20
     defaults:
       run:
-        working-directory: plot-to-ghar/web
+        working-directory: web
 
     steps:
       - uses: actions/checkout@v4
